@@ -11,6 +11,7 @@ export interface TrustRequest {
   wallet_address?: string;
   wallet_chain?: Chain;
   country_code?: string;
+  use_case?: 'signup' | 'login' | 'checkout' | 'kyc' | 'airdrop' | 'wallet_onboarding';
 }
 
 export interface Web2Risk {
@@ -65,7 +66,11 @@ export interface TrustResponse {
   id: string;
   trust_score: number;
   trust_level: TrustLevel;
+  decision: Recommendation;
   recommendation: Recommendation;
+  confidence: number;
+  reasons: string[];
+  use_case: string;
   web2_risk?: Web2Risk;
   web3_risk?: Web3Risk;
   signals: { signal: string; severity: 'low' | 'medium' | 'high' | 'critical'; source: string }[];
