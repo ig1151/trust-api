@@ -1,12 +1,15 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger';
 import { analyzeEmail } from '../utils/email.utils';
 import { analyzePhone } from '../utils/phone.utils';
 import { analyzeIP } from '../utils/ip.utils';
 import { analyzeWallet } from '../utils/wallet.utils';
-import type { TrustRequest, TrustResponse, TrustLevel, Recommendation, Web2Risk, Web3Risk } from '../types/index';
+import type { TrustRequest, TrustResponse, TrustLevel, Recommendation, Web2Risk, Web3Risk, ContentSafety } from '../types/index';
+import { config } from '../utils/config';
 
-// Use case thresholds — stricter for kyc/airdrop, lenient for login
+const client = new Anthropic({ apiKey: config.anthropic.apiKey });
+
 const USE_CASE_THRESHOLDS: Record<string, { blockAt: number; verifyAt: number }> = {
   signup:             { blockAt: 65, verifyAt: 35 },
   login:              { blockAt: 75, verifyAt: 45 },
@@ -31,7 +34,6 @@ function getRecommendation(riskScore: number, useCase: string): Recommendation {
 }
 
 function getConfidence(checksPerformed: number, signalCount: number): number {
-  // More checks + more signals = higher confidence
   const checkWeight = Math.min(checksPerformed / 4, 1) * 0.6;
   const signalWeight = Math.min(signalCount / 5, 1) * 0.4;
   return parseFloat((checkWeight + signalWeight).toFixed(2));
@@ -43,15 +45,67 @@ function getReasonsFromSignals(signals: TrustResponse['signals']): string[] {
     .filter(s => s.severity !== 'low' || signals.filter(x => x.severity !== 'low').length === 0)
     .sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity])
     .slice(0, 5)
-    .map(s => s.signal
-      .toLowerCase()
-      .replace(/\s+/g, '_')
-      .replace(/[^a-z0-9_]/g, '')
-    );
+    .map(s => s.signal.toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, ''));
 }
 
 function invertScore(riskScore: number): number {
   return Math.max(0, 100 - riskScore);
+}
+
+async function checkContentSafety(text: string, context?: string): Promise<ContentSafety> {
+  const prompt = `You are an AI safety classifier. Analyze the following text for safety issues.
+
+${context ? `Context: ${context}\n` : ''}
+Text to analyze:
+"""
+${text}
+"""
+
+Check for: hallucination, toxicity, pii, policy_violation, bias, misinformation, prompt_injection
+
+Return ONLY valid JSON:
+{
+  "safe": <boolean>,
+  "decision": "<safe|unsafe|review>",
+  "confidence": <float 0-1>,
+  "issues": ["<issue_code>"],
+  "categories": {
+    "hallucination": <boolean>,
+    "toxicity": <boolean>,
+    "pii": <boolean>,
+    "policy_violation": <boolean>,
+    "bias": <boolean>,
+    "misinformation": <boolean>,
+    "prompt_injection": <boolean>
+  },
+  "flagged_segments": ["<exact quote>"]
+}`;
+
+  const response = await client.messages.create({
+    model: config.anthropic.model,
+    max_tokens: 512,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const raw = response.content.find(b => b.type === 'text')?.text ?? '{}';
+  const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+
+  return {
+    safe: Boolean(parsed.safe ?? true),
+    decision: (parsed.decision ?? 'safe') as 'safe' | 'review' | 'unsafe',
+    confidence: Number(parsed.confidence ?? 0.8),
+    issues: (parsed.issues ?? []) as string[],
+    flagged_segments: (parsed.flagged_segments ?? []) as string[],
+    categories: {
+      hallucination: Boolean(parsed.categories?.hallucination ?? false),
+      toxicity: Boolean(parsed.categories?.toxicity ?? false),
+      pii: Boolean(parsed.categories?.pii ?? false),
+      policy_violation: Boolean(parsed.categories?.policy_violation ?? false),
+      bias: Boolean(parsed.categories?.bias ?? false),
+      misinformation: Boolean(parsed.categories?.misinformation ?? false),
+      prompt_injection: Boolean(parsed.categories?.prompt_injection ?? false),
+    },
+  };
 }
 
 export async function assessTrust(req: TrustRequest): Promise<TrustResponse> {
@@ -61,12 +115,14 @@ export async function assessTrust(req: TrustRequest): Promise<TrustResponse> {
   const checksPerformed: string[] = [];
   const signals: TrustResponse['signals'] = [];
 
-  logger.info({ id, useCase, hasEmail: !!req.email, hasPhone: !!req.phone, hasIp: !!req.ip, hasWallet: !!req.wallet_address }, 'Starting trust assessment');
+  logger.info({ id, useCase, hasEmail: !!req.email, hasPhone: !!req.phone, hasIp: !!req.ip, hasWallet: !!req.wallet_address, hasContent: !!req.content }, 'Starting trust assessment');
 
   let web2Risk: Web2Risk | undefined;
   let web3Risk: Web3Risk | undefined;
+  let contentSafety: ContentSafety | undefined;
   let web2RiskScore = 0;
   let web3RiskScore = 0;
+  let contentRiskScore = 0;
 
   // Web2 checks
   if (req.email || req.phone || req.ip) {
@@ -101,7 +157,6 @@ export async function assessTrust(req: TrustRequest): Promise<TrustResponse> {
     const web2Scores = [emailData?.risk_score ?? 0, phoneData?.risk_score ?? 0, ipData?.risk_score ?? 0].filter((_, i) => [req.email, req.phone, req.ip][i]);
     web2RiskScore = web2Scores.length > 0 ? Math.round(web2Scores.reduce((a, b) => a + b, 0) / web2Scores.length) : 0;
 
-    // Correlation bonus
     const highRiskCount = [emailData?.disposable, phoneData?.is_likely_fake, ipData?.is_tor, ipData?.is_proxy].filter(Boolean).length;
     if (highRiskCount >= 2) web2RiskScore = Math.min(100, web2RiskScore + 15);
 
@@ -141,16 +196,42 @@ export async function assessTrust(req: TrustRequest): Promise<TrustResponse> {
     };
   }
 
+  // Content safety check
+  if (req.content) {
+    checksPerformed.push('content');
+    try {
+      contentSafety = await checkContentSafety(req.content, req.content_context);
+      contentRiskScore = contentSafety.safe ? 0 : contentSafety.decision === 'unsafe' ? 80 : 40;
+
+      if (!contentSafety.safe) {
+        contentSafety.issues.forEach(issue => {
+          signals.push({
+            signal: `Content safety: ${issue.replace(/_/g, ' ')}`,
+            severity: issue === 'toxicity' || issue === 'prompt_injection' ? 'critical' : 'high',
+            source: 'content',
+          });
+        });
+      }
+    } catch (err) {
+      logger.warn({ id, err }, 'Content safety check failed');
+    }
+  }
+
   // Combined risk score
   const scores: number[] = [];
   if (web2Risk) scores.push(web2RiskScore);
   if (web3Risk) scores.push(web3RiskScore);
+  if (req.content) scores.push(contentRiskScore);
   let finalRiskScore = scores.length > 0 ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
 
-  // Cross-signal penalty
+  // Cross-signal penalties
   if (web2Risk && web3Risk && web2RiskScore > 40 && web3RiskScore > 40) {
     finalRiskScore = Math.min(100, finalRiskScore + 15);
     signals.push({ signal: 'Multiple risk sources detected', severity: 'high', source: 'combined' });
+  }
+  if (contentSafety && !contentSafety.safe && finalRiskScore > 30) {
+    finalRiskScore = Math.min(100, finalRiskScore + 10);
+    signals.push({ signal: 'Unsafe content combined with risk signals', severity: 'high', source: 'combined' });
   }
 
   const trustScore = invertScore(finalRiskScore);
@@ -167,6 +248,7 @@ export async function assessTrust(req: TrustRequest): Promise<TrustResponse> {
     confidence, reasons, use_case: useCase,
     ...(web2Risk && { web2_risk: web2Risk }),
     ...(web3Risk && { web3_risk: web3Risk }),
+    ...(contentSafety && { content_safety: contentSafety }),
     signals, checks_performed: checksPerformed,
     latency_ms: Date.now() - t0, created_at: new Date().toISOString(),
   };

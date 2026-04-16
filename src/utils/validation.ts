@@ -8,6 +8,8 @@ export const trustSchema = Joi.object({
   wallet_chain: Joi.string().valid('ethereum', 'solana', 'bnb', 'xrp', 'auto').default('auto'),
   country_code: Joi.string().length(2).uppercase().optional(),
   use_case: Joi.string().valid('signup', 'login', 'checkout', 'kyc', 'airdrop', 'wallet_onboarding').default('signup'),
-}).or('email', 'phone', 'ip', 'wallet_address').messages({
-  'object.missing': 'At least one of email, phone, ip or wallet_address is required',
+  content: Joi.string().max(10000).optional(),
+  content_context: Joi.string().max(2000).optional(),
+}).or('email', 'phone', 'ip', 'wallet_address', 'content').messages({
+  'object.missing': 'At least one of email, phone, ip, wallet_address or content is required',
 });

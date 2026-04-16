@@ -36,9 +36,30 @@ export interface ContentSafety {
 export interface Web2Risk {
   score: number;
   level: RiskLevel;
-  email?: { valid: boolean; disposable: boolean; free_provider: boolean; role_based: boolean; is_business: boolean; risk_score: number; };
-  phone?: { valid: boolean; line_type: string; is_voip: boolean; is_likely_fake: boolean; risk_score: number; };
-  ip?: { country: string; is_vpn: boolean; is_proxy: boolean; is_tor: boolean; is_hosting: boolean; threat_level: string; risk_score: number; };
+  email?: {
+    valid: boolean;
+    disposable: boolean;
+    free_provider: boolean;
+    role_based: boolean;
+    is_business: boolean;
+    risk_score: number;
+  };
+  phone?: {
+    valid: boolean;
+    line_type: string;
+    is_voip: boolean;
+    is_likely_fake: boolean;
+    risk_score: number;
+  };
+  ip?: {
+    country: string;
+    is_vpn: boolean;
+    is_proxy: boolean;
+    is_tor: boolean;
+    is_hosting: boolean;
+    threat_level: string;
+    risk_score: number;
+  };
 }
 
 export interface Web3Risk {
@@ -51,7 +72,13 @@ export interface Web3Risk {
   total_transactions: number;
   native_balance?: string;
   native_currency: string;
-  flags: { interacted_with_mixer: boolean; interacted_with_known_scam: boolean; high_frequency_trading: boolean; large_value_transfers: boolean; dormant_then_active: boolean; };
+  flags: {
+    interacted_with_mixer: boolean;
+    interacted_with_known_scam: boolean;
+    high_frequency_trading: boolean;
+    large_value_transfers: boolean;
+    dormant_then_active: boolean;
+  };
 }
 
 export interface TrustResponse {
